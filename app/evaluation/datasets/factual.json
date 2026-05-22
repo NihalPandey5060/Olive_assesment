@@ -1,0 +1,5 @@
+[
+  {"id": "capitals_1", "prompt": "What is the capital of France?", "expected": "Paris"},
+  {"id": "science_1", "prompt": "What is the chemical symbol for water?", "expected": "H2O"},
+  {"id": "prog_1", "prompt": "In Python, how do you create a list comprehension that squares numbers 0-4?", "expected": "[x*x for x in range(5)]"}
+]

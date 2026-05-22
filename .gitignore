@@ -1,0 +1,9 @@
+.env
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+reports/
+app/evaluation/reports/
+.DS_Store
