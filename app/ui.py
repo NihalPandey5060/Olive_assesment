@@ -12,8 +12,8 @@ API_URL = f"http://localhost:{config.API_PORT}"
 REQUEST_TIMEOUT_SECONDS = int(getattr(config, "REQUEST_TIMEOUT_SECONDS", 120))
 
 
-def post_compare(prompt: str, category: str) -> Dict[str, Any]:
-    payload = {"prompt": prompt, "category": category}
+def post_compare(prompt: str) -> Dict[str, Any]:
+    payload = {"prompt": prompt}
     r = requests.post(f"{API_URL}/compare", json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
     r.raise_for_status()
     return r.json()
@@ -42,7 +42,6 @@ def main():
 
     with st.sidebar:
         st.header("Settings")
-        category = st.selectbox("Prompt category", ["General", "Factual", "Jailbreak", "Bias/Sensitive"], index=0)
         temperature = st.slider("Temperature", 0.0, 1.0, 0.7)
         st.caption(f"OSS model: {config.OSS_MODEL}")
         st.caption(f"Frontier model: {config.FRONTIER_MODEL}")
@@ -56,7 +55,7 @@ def main():
         else:
             with st.spinner("Sending prompt and waiting for responses..."):
                 try:
-                    result = post_compare(prompt, category)
+                    result = post_compare(prompt)
                 except Exception as e:
                     st.error(f"Error contacting backend: {e}")
                     return
