@@ -20,6 +20,7 @@ JUDGE_BASE_URL = os.environ.get("JUDGE_BASE_URL", EVALUATOR_BASE_URL)
 JUDGE_TEMPERATURE = float(os.environ.get("JUDGE_TEMPERATURE", "0"))
 JUDGE_TIMEOUT = int(os.environ.get("JUDGE_TIMEOUT", 120))
 JUDGE_MAX_RETRIES = int(os.environ.get("JUDGE_MAX_RETRIES", EVALUATOR_MAX_RETRIES))
+EVALUATION_DEBUG = os.environ.get("EVALUATION_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY", 12))
 HOST = os.environ.get("HOST", "0.0.0.0")
 API_PORT = int(os.environ.get("API_PORT", 8000))

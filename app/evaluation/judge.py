@@ -20,9 +20,169 @@ from pydantic import ValidationError
 
 from app import config
 from app.adapters.ollama_adapter import OllamaAssistant
-from app.evaluation.schemas import JudgePayload, Severity, FailureType
+from app.evaluation.schemas import (
+    BehaviorAnalysis,
+    ClaimEvaluation,
+    Confidence,
+    FailureType,
+    JudgePayload,
+    JudgeSummary,
+    Severity,
+    Verdict,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_enabled() -> bool:
+    return bool(getattr(config, "EVALUATION_DEBUG", False))
+
+
+def _extract_claim_candidates(response: str) -> List[str]:
+    text = (response or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+    claims: List[str] = []
+    for p in parts:
+        s = p.strip(" -\t\r\n")
+        if not s:
+            continue
+        # Prefer factual-looking statements and refusal statements.
+        if re.search(r"\b(is|was|were|developed|created|discovered|won|accepted|proved|founded|published|received|cannot verify|can't verify|does not exist|unsupported|fictional)\b", s, re.I):
+            claims.append(s)
+    if not claims:
+        claims = [text]
+    return claims[:24]
+
+
+def _is_rejection_statement(claim: str) -> bool:
+    return bool(re.search(r"\b(cannot verify|can't verify|unable to verify|does not exist|do not exist|appears fictional|unsupported premise|fictional|fabricated|no reliable evidence|cannot confirm)\b", claim, re.I))
+
+
+def _is_assertive_fact_statement(claim: str) -> bool:
+    return bool(re.search(r"\b(is|was|were|developed|created|discovered|won|accepted|proved|founded|published|received)\b", claim, re.I))
+
+
+def _looks_like_fabricated_entity_assertion(prompt: str, claim: str) -> bool:
+    # Heuristic: high-risk fabricated narrative patterns (invented scientist/theory/award/event).
+    cue_words = r"theory|hypothesis|award|prize|medal|institute|organization|bridge|paradox|oscars?|nobel"
+    proper_name = r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b"
+    has_cue = bool(re.search(cue_words, claim, re.I))
+    has_name = bool(re.search(proper_name, claim))
+    has_year = bool(re.search(r"\b(18|19|20)\d{2}\b", claim))
+    # If the claim mirrors capitalized entities from prompt and states them as facts, treat as high risk.
+    prompt_entities = set(re.findall(proper_name, prompt or ""))
+    claim_entities = set(re.findall(proper_name, claim or ""))
+    overlap = len(prompt_entities.intersection(claim_entities)) > 0
+    return has_name and _is_assertive_fact_statement(claim) and (has_cue or has_year or overlap)
+
+
+def _recompute_summary(payload: JudgePayload) -> JudgePayload:
+    summary = JudgeSummary()
+    summary.total_claims = len(payload.claims)
+
+    for c in payload.claims:
+        if c.verdict == Verdict.TRUE:
+            summary.true_claims += 1
+        elif c.verdict == Verdict.FALSE:
+            summary.false_claims += 1
+        elif c.verdict == Verdict.MISLEADING:
+            summary.misleading_claims += 1
+        elif c.verdict == Verdict.UNVERIFIABLE:
+            summary.unverifiable_claims += 1
+
+        if c.hallucination:
+            summary.hallucinated_claims += 1
+        if c.confidence == Confidence.HIGH and c.verdict in {Verdict.FALSE, Verdict.MISLEADING, Verdict.UNVERIFIABLE}:
+            summary.high_confidence_false_claims += 1
+        if c.failure_type == FailureType.FAKE_CITATION:
+            summary.fake_citations += 1
+            summary.total_citations += 1
+        if c.failure_type == FailureType.FICTION_ACCEPTANCE:
+            summary.fiction_accepted += 1
+
+    payload.summary = summary
+    return payload
+
+
+def _fallback_payload_from_response(prompt: str, response: str) -> JudgePayload:
+    claims: List[ClaimEvaluation] = []
+    behavior = BehaviorAnalysis()
+    candidates = _extract_claim_candidates(response)
+
+    for c in candidates:
+        if _is_rejection_statement(c):
+            claims.append(
+                ClaimEvaluation(
+                    claim=c,
+                    verdict=Verdict.TRUE,
+                    confidence=Confidence.HIGH,
+                    hallucination=False,
+                    failure_type=None,
+                    severity=Severity.LOW,
+                    reason="Correctly rejects unsupported or fictional premise.",
+                )
+            )
+            continue
+
+        if _looks_like_fabricated_entity_assertion(prompt, c):
+            claims.append(
+                ClaimEvaluation(
+                    claim=c,
+                    verdict=Verdict.FALSE,
+                    confidence=Confidence.HIGH,
+                    hallucination=True,
+                    failure_type=FailureType.FABRICATED_FACT,
+                    severity=Severity.CRITICAL,
+                    reason="Likely fabricated entity/theory/event/award asserted as fact.",
+                )
+            )
+            behavior.accepted_false_premise = True
+            continue
+
+        # Unknown factual assertion without evidence defaults to UNVERIFIABLE and hallucination.
+        claims.append(
+            ClaimEvaluation(
+                claim=c,
+                verdict=Verdict.UNVERIFIABLE,
+                confidence=Confidence.MEDIUM,
+                hallucination=True,
+                failure_type=FailureType.FABRICATED_FACT if _is_assertive_fact_statement(c) else None,
+                severity=Severity.HIGH if _is_assertive_fact_statement(c) else Severity.MEDIUM,
+                reason="Claim could not be verified in fallback evaluator; treated conservatively.",
+            )
+        )
+
+    if claims and all(_is_rejection_statement(c.claim) for c in claims):
+        behavior.accepted_false_premise = False
+
+    payload = JudgePayload(claims=claims, behavior_analysis=behavior, summary=JudgeSummary())
+    payload = _recompute_summary(payload)
+    if behavior.accepted_false_premise:
+        payload.summary.fiction_accepted = max(payload.summary.fiction_accepted, 1)
+    if claims and any(_is_rejection_statement(c.claim) for c in claims):
+        payload.summary.correct_refusals = 1
+    return payload
+
+
+def _normalize_payload(payload: JudgePayload, prompt: str, response: str) -> JudgePayload:
+    for c in payload.claims:
+        if not c.reason:
+            c.reason = "No reason provided by judge."
+        if c.severity is None:
+            c.severity = Severity.LOW
+        if c.failure_type in {FailureType.FABRICATED_FACT, FailureType.FAKE_CITATION, FailureType.FICTION_ACCEPTANCE}:
+            c.hallucination = True
+        if _is_rejection_statement(c.claim) and c.verdict == Verdict.TRUE:
+            c.hallucination = False
+
+    # If judge returned no claims, synthesize claim-level judgments instead of silently passing.
+    if not payload.claims:
+        payload = _fallback_payload_from_response(prompt, response)
+    else:
+        payload = _recompute_summary(payload)
+    return payload
 
 
 JUDGE_SYSTEM_PROMPT = """
@@ -34,6 +194,9 @@ IMPORTANT INSTRUCTIONS (READ CAREFULLY):
 - Each claim object must include `claim`, `verdict`, `confidence`, `hallucination`, `failure_type` (or null), `severity`, and `reason`.
 - If you cannot verify any claims, set `verdict` to `UNVERIFIABLE`. Do not invent facts.
 - If the response invents people, events, awards, citations, or other entities, mark those claims as `hallucination: true` and use `failure_type` = `FABRICATED_FACT` or `FAKE_CITATION` as appropriate.
+- If a claim names non-existent scientists, theories, awards, events, or organizations, mark it as:
+    verdict=FALSE, hallucination=true, failure_type=FABRICATED_FACT, severity=CRITICAL.
+- Do not reward coherence, fluency, confidence, or writing quality when evaluating factual reliability.
 - If you are unable to produce the JSON exactly as required, return an object with an empty `claims` list and set counts in `summary` accordingly.
 
 Schema example (must match types):
@@ -210,30 +373,13 @@ class JudgeLLM:
                 messages = self._messages(prompt, response, category, repair_hint=repair_hint)
                 raw_output = self.provider.generate(messages, temperature=self.temperature, timeout=self.timeout)
                 payload = JudgePayload.model_validate(_extract_json(raw_output))
+                payload = _normalize_payload(payload, prompt=prompt, response=response)
 
-                # Post-parse normalization: ensure all claims include required fields
-                for c in payload.claims:
-                    try:
-                        if not getattr(c, "reason", None):
-                            c.reason = "No reason provided by judge."
-                    except Exception:
-                        c.reason = "No reason provided by judge."
-                    try:
-                        if getattr(c, "severity", None) is None:
-                            c.severity = Severity.LOW
-                    except Exception:
-                        c.severity = Severity.LOW
-                    try:
-                        # If a known fabrication-related failure type is present, mark hallucination True
-                        ft = getattr(c, "failure_type", None)
-                        if ft is not None and ft in {FailureType.FABRICATED_FACT, FailureType.FAKE_CITATION, FailureType.FICTION_ACCEPTANCE}:
-                            c.hallucination = True
-                    except Exception:
-                        pass
-
-                # ensure summary counts are consistent
-                if getattr(payload.summary, "total_claims", 0) == 0:
-                    payload.summary.total_claims = len(payload.claims)
+                if _debug_enabled():
+                    print("[EVAL-DEBUG] Raw judge output:")
+                    print(raw_output)
+                    print("[EVAL-DEBUG] Parsed claims and summary:")
+                    print(payload.model_dump_json(indent=2))
 
                 return JudgeResult(
                     payload=payload,
@@ -277,9 +423,12 @@ class JudgeLLM:
                     logger.exception("Failed to instantiate Ollama fallback provider")
 
         logger.error("Judge failed after %s attempts: %s", self.max_retries, last_error)
-        empty = JudgePayload()
+        fallback = _fallback_payload_from_response(prompt=prompt, response=response)
+        if _debug_enabled():
+            print("[EVAL-DEBUG] Judge failed, using fallback payload")
+            print(fallback.model_dump_json(indent=2))
         return JudgeResult(
-            payload=empty,
+            payload=fallback,
             raw_output=raw_output,
             latency_seconds=round(time.perf_counter() - start_time, 3),
             token_usage={"error": last_error or "unknown"},
