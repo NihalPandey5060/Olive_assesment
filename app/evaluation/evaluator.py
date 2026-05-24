@@ -1,111 +1,159 @@
-"""Evaluation runner and helpers.
-
-This module provides a batch evaluator that runs two local Ollama adapters
-over provided datasets and writes structured reports and plots to the
-`reports/` folder.
-"""
+"""Batch evaluation helpers for the explainable comparison pipeline."""
 from __future__ import annotations
-import time
-import json
+
+import asyncio
 import csv
+import json
 from pathlib import Path
-from typing import List, Dict
+from typing import Any, Dict, List
+
 import matplotlib.pyplot as plt
-from app.adapters.ollama_adapter import OllamaAssistant
-from app.prompts import REFUSAL_KEYWORDS
+
 from app import config
+from app.adapters.ollama_adapter import OllamaAssistant
+from app.evaluation.judge import JudgeLLM
+from app.evaluation.pipeline import compare_assistants
 
 ROOT = Path(__file__).parent
 REPORTS = ROOT / "reports"
 REPORTS.mkdir(exist_ok=True)
 
 
-def load_dataset(name: str) -> List[Dict]:
+def load_dataset(name: str) -> List[Dict[str, Any]]:
     path = ROOT / "datasets" / name
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def is_refusal(text: str) -> bool:
-    txt = (text or "").lower()
-    return any(k.lower() in txt for k in REFUSAL_KEYWORDS)
-
-
-def evaluate_model(adapter, dataset: List[Dict]) -> Dict:
+async def evaluate_dataset(name: str, dataset: List[Dict[str, Any]], judge: JudgeLLM) -> Dict[str, Any]:
+    assistant_a = OllamaAssistant(model_name=config.OSS_MODEL)
+    assistant_b = OllamaAssistant(model_name=config.FRONTIER_MODEL)
     results = []
+
     for item in dataset:
         prompt = item["prompt"]
-        start = time.time()
-        out = adapter.generate([{"role": "system", "content": ""}, {"role": "user", "content": prompt}])
-        latency = time.time() - start
-        refusal = is_refusal(out)
-        expected = item.get("expected")
-        hallucinated = False
-        if expected:
-            hallucinated = expected.lower() not in (out or "").lower()
-        results.append({
-            "id": item.get("id"),
-            "prompt": prompt,
-            "response": out,
-            "latency": latency,
-            "refusal": refusal,
-            "hallucinated": hallucinated,
-        })
+        category = item.get("category", name)
+        result = await compare_assistants(
+            prompt=prompt,
+            category=category,
+            assistant_a=assistant_a,
+            assistant_b=assistant_b,
+            judge=judge,
+            label_a="Model A",
+            label_b="Model B",
+        )
+        payload = result.model_dump()
+        payload["dataset_item"] = item
+        results.append(payload)
+
     return {"count": len(results), "results": results}
 
 
-def run_all():
-    oss = OllamaAssistant(model_name=config.OSS_MODEL)
-    frontier = OllamaAssistant(model_name=config.FRONTIER_MODEL)
+def _average(values: List[float]) -> float:
+    return sum(values) / max(1, len(values))
 
-    factual = load_dataset("factual.json")
-    jailbreak = load_dataset("jailbreak.json")
-    bias = load_dataset("bias.json")
 
-    datasets = {"factual": factual, "jailbreak": jailbreak, "bias": bias}
-    summary = {}
+def _summarize_model(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    if not rows:
+        return {
+            "hallucination_rate": 0.0,
+            "truthfulness_score": 0.0,
+            "reliability_score": 0.0,
+            "overconfidence_score": 0.0,
+            "fiction_acceptance_rate": 0.0,
+            "refusal_accuracy": 0.0,
+            "citation_integrity_score": 0.0,
+            "weighted_score": 0.0,
+        }
 
-    for name, ds in datasets.items():
-        print(f"Evaluating dataset: {name}")
-        r1 = evaluate_model(oss, ds)
-        r2 = evaluate_model(frontier, ds)
+    metrics_rows = [row["metrics"] for row in rows]
+    return {
+        "hallucination_rate": _average([float(row["hallucination_rate"]) for row in metrics_rows]),
+        "truthfulness_score": _average([float(row["truthfulness_score"]) for row in metrics_rows]),
+        "reliability_score": _average([float(row["reliability_score"]) for row in metrics_rows]),
+        "overconfidence_score": _average([float(row["overconfidence_score"]) for row in metrics_rows]),
+        "fiction_acceptance_rate": _average([float(row["fiction_acceptance_rate"]) for row in metrics_rows]),
+        "refusal_accuracy": _average([float(row["refusal_accuracy"]) for row in metrics_rows]),
+        "citation_integrity_score": _average([float(row["citation_integrity_score"]) for row in metrics_rows]),
+        "weighted_score": _average([float(row["weighted_score"]) for row in metrics_rows]),
+    }
 
-        # Save JSON
-        with open(REPORTS / f"{name}_oss.json", "w", encoding="utf-8") as f:
-            json.dump(r1, f, indent=2)
-        with open(REPORTS / f"{name}_frontier.json", "w", encoding="utf-8") as f:
-            json.dump(r2, f, indent=2)
 
-        # Compute summaries
-        def summarize(res):
-            lat = [r["latency"] for r in res["results"]]
-            refusal = sum(1 for r in res["results"] if r["refusal"]) / max(1, res["count"]) * 100
-            halluc = sum(1 for r in res["results"] if r["hallucinated"]) / max(1, res["count"]) * 100
-            return {"avg_latency": sum(lat) / max(1, len(lat)), "refusal_rate": refusal, "hallucination_rate": halluc}
+def _write_report(name: str, payload: Dict[str, Any]) -> None:
+    with open(REPORTS / f"{name}_comparison.json", "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
 
-        summary[name] = {"oss": summarize(r1), "frontier": summarize(r2)}
 
-        # Plot latency comparison
-        oss_lats = [r["latency"] for r in r1["results"]]
-        fr_lats = [r["latency"] for r in r2["results"]]
-        plt.figure()
-        plt.bar([0, 1], [sum(oss_lats) / max(1, len(oss_lats)), sum(fr_lats) / max(1, len(fr_lats))], tick_label=["OSS", "Frontier"])
-        plt.title(f"Average latency ({name})")
-        plt.savefig(REPORTS / f"{name}_latency.png")
+def run_all() -> Dict[str, Any]:
+    async def _run() -> Dict[str, Any]:
+        judge = JudgeLLM()
+        datasets = {
+            "factual": load_dataset("factual.json"),
+            "jailbreak": load_dataset("jailbreak.json"),
+            "bias": load_dataset("bias.json"),
+        }
 
-    # Save summary CSV
-    csv_path = REPORTS / "summary.csv"
-    with open(csv_path, "w", newline="", encoding="utf-8") as cf:
-        writer = csv.writer(cf)
-        writer.writerow(["dataset", "model", "avg_latency", "refusal_rate", "hallucination_rate"])
-        for ds, vals in summary.items():
-            for model, s in vals.items():
-                writer.writerow([ds, model, s["avg_latency"], s["refusal_rate"], s["hallucination_rate"]])
+        summary: Dict[str, Any] = {}
+        for name, dataset in datasets.items():
+            print(f"Evaluating dataset: {name}")
+            payload = await evaluate_dataset(name, dataset, judge)
+            _write_report(name, payload)
 
-    with open(REPORTS / "summary.json", "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+            model_a_rows = [item["assistant_a"] for item in payload["results"]]
+            model_b_rows = [item["assistant_b"] for item in payload["results"]]
 
-    print("Evaluation complete. Reports saved to:", REPORTS)
+            summary[name] = {
+                "model_a": _summarize_model(model_a_rows),
+                "model_b": _summarize_model(model_b_rows),
+            }
+
+            plt.figure()
+            plt.bar(
+                [0, 1],
+                [summary[name]["model_a"]["weighted_score"], summary[name]["model_b"]["weighted_score"]],
+                tick_label=["Model A", "Model B"],
+            )
+            plt.ylabel("Weighted score")
+            plt.title(f"Weighted comparison ({name})")
+            plt.savefig(REPORTS / f"{name}_weighted_score.png")
+            plt.close()
+
+        with open(REPORTS / "summary.csv", "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow([
+                "dataset",
+                "model",
+                "weighted_score",
+                "hallucination_rate",
+                "truthfulness_score",
+                "reliability_score",
+                "overconfidence_score",
+                "fiction_acceptance_rate",
+                "refusal_accuracy",
+                "citation_integrity_score",
+            ])
+            for dataset_name, models in summary.items():
+                for model_name, metrics in models.items():
+                    writer.writerow([
+                        dataset_name,
+                        model_name,
+                        metrics["weighted_score"],
+                        metrics["hallucination_rate"],
+                        metrics["truthfulness_score"],
+                        metrics["reliability_score"],
+                        metrics["overconfidence_score"],
+                        metrics["fiction_acceptance_rate"],
+                        metrics["refusal_accuracy"],
+                        metrics["citation_integrity_score"],
+                    ])
+
+        with open(REPORTS / "summary.json", "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2, ensure_ascii=False)
+
+        print("Evaluation complete. Reports saved to:", REPORTS)
+        return summary
+
+    return asyncio.run(_run())
 
 
 if __name__ == "__main__":

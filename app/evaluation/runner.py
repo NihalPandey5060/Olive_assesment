@@ -1,9 +1,10 @@
-"""Small runner script to execute batched evaluation and save reports."""
+"""Command-line entrypoint for batch benchmarking."""
 from __future__ import annotations
+
 from app.evaluation.evaluator import run_all
 
 
-def main():
+def main() -> None:
     print("Starting batch evaluation...")
     run_all()
 

@@ -237,7 +237,11 @@ See the `app/` folder for `api.py`, adapters, conversation manager, evaluation t
 Evaluation
 
 - Use `app.evaluation.runner` or `app.evaluation.evaluator` to run batched tests over provided prompt datasets (`factual.json`, `jailbreak.json`, `bias.json`).
-- Outputs: JSON, CSV and charts saved to `app/evaluation/reports/`.
+- The live API endpoint `/compare` returns a structured comparison with `assistant_a`, `assistant_b`, extracted claims, per-model metrics, explanations, and a winner breakdown.
+- Judge settings are configured through `JUDGE_PROVIDER`, `JUDGE_MODEL`, `JUDGE_API_KEY`, `JUDGE_TEMPERATURE`, and `JUDGE_TIMEOUT`.
+- For Gemini judge, set `JUDGE_PROVIDER=gemini`, set `JUDGE_MODEL` (for example `gemini-2.5-flash`), and provide `JUDGE_API_KEY`.
+- The Gemini judge uses the `google-genai` client.
+- Outputs: JSON, CSV, charts, and benchmark history entries saved to `app/evaluation/reports/`.
 
 Design tradeoffs
 

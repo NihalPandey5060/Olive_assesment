@@ -1,7 +1,7 @@
 fastapi>=0.95.0
 streamlit
 plotly
-google-generativeai
+google-genai
 requests
 uvicorn[standard]>=0.22.0
 python-dotenv>=1.0.0
