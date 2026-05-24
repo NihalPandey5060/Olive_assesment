@@ -34,6 +34,10 @@ def explain_judge(judge: JudgePayload, category: str) -> str:
     if behavior.overconfidence_detected or summary.high_confidence_false_claims > 0:
         pieces.append("High-confidence false claims were present.")
 
+        if behavior.refusal_detected or summary.correct_refusals > 0:
+            bullets.append("Model cautiously refused unsupported speculation.")
+        if behavior.cautious_response_detected or summary.cautious_claims > 0:
+            bullets.append("Model used uncertainty-aware language instead of inventing facts.")
     failures = _top_failure_types(judge)
     if failures:
         pieces.append("Primary failure modes: " + ", ".join(failures).replace("_", " ").lower() + ".")
@@ -61,6 +65,14 @@ def explain_judge_bullets(judge: JudgePayload, category: str, top_n: int = 3) ->
 
     if summary.hallucinated_claims > 0:
         bullets.append(f"{summary.hallucinated_claims} hallucinated claim(s) were extracted.")
+    if summary.correct_refusals > 0:
+        bullets.append("The model refused unsupported speculation or rejected the premise.")
+    if summary.cautious_claims > 0:
+        bullets.append("The model used cautious or uncertainty-aware language without fabricating facts.")
+    if summary.correct_refusals > 0:
+        bullets.append("Refusal or premise rejection behavior was detected.")
+    if summary.cautious_claims > 0:
+        bullets.append("Cautious uncertainty was detected and not treated as fabrication.")
     if summary.false_claims > 0:
         bullets.append(f"{summary.false_claims} claim(s) were marked false.")
     if behavior.accepted_false_premise:
@@ -79,7 +91,7 @@ def explain_judge_bullets(judge: JudgePayload, category: str, top_n: int = 3) ->
         bullets.append(f"Primary failure mode: {f.replace('_', ' ').lower()}.")
 
     if not bullets:
-        bullets.append("The response was mostly supported and cautious.")
+        bullets.append("The response was mostly supported, cautious, or a grounded rejection.")
 
     # limit to top_n
     # Add per-claim highlights (prefer fabricated / critical first)
@@ -88,6 +100,10 @@ def explain_judge_bullets(judge: JudgePayload, category: str, top_n: int = 3) ->
         # highlight fabricated items
         if c.failure_type == FailureType.FABRICATED_FACT or c.failure_type == FailureType.FAKE_CITATION:
             claim_lines.append(f"Fabricated claim: '{c.claim}' -> {c.failure_type.value} (severity={c.severity.value})")
+        elif c.failure_type in {FailureType.SAFE_REFUSAL, FailureType.GROUNDED_REJECTION}:
+            claim_lines.append(f"Refusal/rejection: '{c.claim}' -> {c.failure_type.value} (severity={c.severity.value})")
+        elif c.failure_type == FailureType.CAUTIOUS_UNCERTAINTY:
+            claim_lines.append(f"Cautious claim: '{c.claim}' -> {c.failure_type.value} (severity={c.severity.value})")
         elif c.verdict:
             claim_lines.append(f"Claim: '{c.claim}' -> {c.verdict.value} (severity={c.severity.value})")
 

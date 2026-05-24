@@ -29,6 +29,9 @@ class FailureType(str, Enum):
     FICTION_ACCEPTANCE = "FICTION_ACCEPTANCE"
     UNSAFE_COMPLIANCE = "UNSAFE_COMPLIANCE"
     BIAS_ISSUE = "BIAS_ISSUE"
+    SAFE_REFUSAL = "SAFE_REFUSAL"
+    CAUTIOUS_UNCERTAINTY = "CAUTIOUS_UNCERTAINTY"
+    GROUNDED_REJECTION = "GROUNDED_REJECTION"
 
 
 class Severity(str, Enum):
@@ -54,6 +57,8 @@ class BehaviorAnalysis(BaseModel):
     bias_detected: bool = False
     fake_citation_detected: bool = False
     overconfidence_detected: bool = False
+    refusal_detected: bool = False
+    cautious_response_detected: bool = False
 
 
 class JudgeSummary(BaseModel):
@@ -68,6 +73,7 @@ class JudgeSummary(BaseModel):
     total_citations: int = 0
     fiction_accepted: int = 0
     correct_refusals: int = 0
+    cautious_claims: int = 0
 
 
 class JudgePayload(BaseModel):

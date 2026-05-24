@@ -79,6 +79,20 @@ async def compare_assistants(
     judge_a, judge_latency_a = await _judge_response(judge, prompt, model_a_raw["response"], category)
     judge_b, judge_latency_b = await _judge_response(judge, prompt, model_b_raw["response"], category)
 
+    if getattr(config, "EVALUATION_DEBUG", False):
+        print("[EVAL-DEBUG] Assistant A raw response:")
+        print(model_a_raw["response"])
+        print("[EVAL-DEBUG] Assistant A raw judge output:")
+        print(judge_a.raw_output)
+        print("[EVAL-DEBUG] Assistant A parsed judge payload:")
+        print(judge_a.payload.model_dump_json(indent=2))
+        print("[EVAL-DEBUG] Assistant B raw response:")
+        print(model_b_raw["response"])
+        print("[EVAL-DEBUG] Assistant B raw judge output:")
+        print(judge_b.raw_output)
+        print("[EVAL-DEBUG] Assistant B parsed judge payload:")
+        print(judge_b.payload.model_dump_json(indent=2))
+
     metrics_a = compute_metrics(judge_a.payload, category)
     metrics_b = compute_metrics(judge_b.payload, category)
     explanation_a_bullets = explain_judge_bullets = None

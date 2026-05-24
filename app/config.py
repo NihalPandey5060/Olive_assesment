@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+# Preserve explicitly-set environment variables (for runtime debug/provider overrides).
+load_dotenv(override=False)
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OSS_MODEL = os.environ.get("OSS_MODEL", "gemma3:1b")
